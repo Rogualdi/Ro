@@ -2,6 +2,7 @@
 import type { PerfilDano, Grau } from './resolution';
 import type { Periodo, Estacao, CalendarioState } from './time';
 import type { RngState } from './rng';
+import type { MundoState } from './mundo';
 
 // ── As seis posições de atributo. Mecânica fixa; o NOME vem do cenário (GDD §3.1).
 export type AttrKey =
@@ -57,6 +58,16 @@ export const NOME_CATEGORIA: Record<CategoriaVerbo, string> = {
 
 export type AlvoTipo = 'nenhum' | 'pessoa' | 'objeto' | 'lugar' | 'si';
 
+// Que tipo de laço existe entre duas pessoas do vale.
+export type LacoTipo =
+  | 'aliada'
+  | 'rival'
+  | 'amante'
+  | 'devedora'
+  | 'protege'
+  | 'desconfia'
+  | 'sangue';
+
 // ── Efeitos: patches que a engine aplica ao estado.
 export type Efeito =
   | { tipo: 'recurso'; recurso: string; delta: number }
@@ -99,6 +110,47 @@ export type Verbo = {
   efeitosPorGrau?: Partial<Record<Grau, Efeito[]>>;
 };
 
+// ── Itens (catálogo estático — GDD §34 "itens_base").
+export type ItemSlot =
+  | 'arma'
+  | 'armadura'
+  | 'escudo'
+  | 'acessorio'
+  | 'consumivel'
+  | 'ferramenta'
+  | 'material'
+  | 'misc';
+
+export type Item = {
+  id: string;
+  nome: string;
+  descricao: string;
+  slot: ItemSlot;
+  peso: number;
+  valor: number; // preço-base de compra em moedas
+  raridade: 'comum' | 'notavel' | 'rara' | 'unica' | 'mitica' | 'proibida' | 'perdida';
+  empilhavel?: boolean;
+  // arma
+  dano?: PerfilDano;
+  alcance?: 'corpo' | 'distancia';
+  atributoAtaque?: AttrKey;
+  // armadura / escudo
+  defesa?: number;
+  // consumível
+  efeitosUso?: Efeito[];
+  // concede um verbo enquanto estiver no inventário (GDD §13.6)
+  concedeVerbo?: string;
+  // onde é vendido (ids de local). Ausente = não vendido em loja.
+  lojas?: string[];
+};
+
+export type Equipado = {
+  arma?: string;
+  armadura?: string;
+  escudo?: string;
+  acessorio?: string;
+};
+
 // ── Personagem.
 export type Personagem = {
   nome: string;
@@ -113,6 +165,7 @@ export type Personagem = {
   dinheiro: number;
   pericias: Record<string, number>;
   inventario: Record<string, number>;
+  equipado: Equipado;
   artesConhecidas: string[];
   alcunhas: string[];
   cicatrizes: string[];
@@ -130,7 +183,14 @@ export type NPC = {
   rotina: Partial<Record<Periodo, string>>; // eles se movem (GDD §10.3)
   vozNarrativa: string;
   personalidade: string;
+  // Como ela é de corpo. O narrador descreve gente, não fichas — e num jogo
+  // adulto isso é parte do retrato, na mesma linha da voz e da índole.
+  corpo?: string;
   segredo?: { conteudo: string; comoDescobrir: string };
+  // Com quem ela tem história. É o que faz o vale ter vida própria: quando duas
+  // se encontram numa rotina, a relação entre elas produz acontecimento sem o
+  // jogador mexer um dedo (ver engine/convivio.ts).
+  relacoes?: { npc: string; tipo: LacoTipo; nota: string }[];
   ensinaMestre?: string; // id de mestre no Livro
   atributos?: Partial<Atributos>;
 };
@@ -140,7 +200,15 @@ export type NpcDinamico = {
   eixos: Record<string, number>; // disposicao/confianca/medo, ou desejo/confianca/conforto
   vivo: boolean;
   tensao: number; // sobe com negligência (GDD §10.4)
-  memoria: { turno: number; resumo: string; peso: number }[];
+  // Lembranças tipadas, retidas por peso (ver engine/memoria.ts). Os campos
+  // novos são opcionais para não invalidar save antigo.
+  memoria: {
+    turno: number;
+    resumo: string;
+    peso: number;
+    tipo?: string;
+    dia?: number;
+  }[];
 };
 
 // ── Local (GDD §7).
@@ -173,6 +241,9 @@ export type Cenario = {
   k: number; // botão de caos (GDD §2.1)
   tabuCentral: string;
   eixosRelacao: { id: string; nome: string }[]; // disposicao/confianca/medo (GDD §10.1)
+  // A verdade do mundo, em poucas linhas. Vai inteira no pacote do narrador:
+  // é isso que faz a voz dele ser deste lugar e não de qualquer fantasia.
+  premissa?: string[];
 };
 
 // ── Classe e origem (GDD §6.3).
@@ -185,6 +256,7 @@ export type Classe = {
   bonusAtributos: Partial<Atributos>;
   periciasIniciais: Record<string, number>;
   itensIniciais?: Record<string, number>;
+  equipInicial?: Equipado;
   artesIniciais?: string[];
 };
 
@@ -260,6 +332,53 @@ export type LivroState = {
   reliquias: Record<string, EstadoEntrada>;
 };
 
+// ── Combate (GDD §16, §17). Resolvido 100% pela engine.
+export type Criatura = {
+  id: string;
+  nome: string;
+  descricao: string;
+  nivel: number;
+  vida: number;
+  defesa: number;
+  acerto: number;
+  ataqueNome: string;
+  dano: PerfilDano;
+  moralBase: number; // 0..100
+  xp: number;
+  faccaoId?: string;
+  loot?: { item: string; chance: number }[];
+  chefe?: boolean;
+  // Fase de chefe: dispara quando a vida cai abaixo do gatilho (0..1).
+  fase2?: { gatilhoPct: number; descricao: string; mecanica: 'apagar_vinculo' | 'chamar_reforco' | 'enfurecer' };
+};
+
+export type CombatActor = {
+  id: string;
+  nome: string;
+  ehJogador: boolean;
+  vida: number;
+  vidaMax: number;
+  defesa: number;
+  acerto: number;
+  dano?: PerfilDano;
+  criaturaId?: string;
+  condicoes: string[];
+  defendendo?: boolean;
+};
+
+export type CombatState = {
+  rodada: number;
+  atores: CombatActor[];
+  ordem: string[]; // ids na ordem de iniciativa
+  turno: number; // índice em ordem
+  moralInimiga: number;
+  terminado: boolean;
+  resultado?: 'vitoria' | 'derrota' | 'fuga';
+  log: string[];
+  fase: number;
+  recompensa?: { xp: number; loot: string[] };
+};
+
 // ── Pacote completo de conteúdo de um cenário.
 export type ContentBundle = {
   cenario: Cenario;
@@ -272,9 +391,25 @@ export type ContentBundle = {
   trabalhos: Trabalho[];
   artes: Arte[];
   reliquias: Reliquia[];
+  itens: Item[];
+  criaturas: Criatura[];
+  quests: Quest[];
   faccoes: { id: string; nome: string }[];
   localInicial: string;
 };
+
+// ── Missões (GDD §13.2/quests_estado). Objetivos simples ligados a flags.
+export type Quest = {
+  id: string;
+  titulo: string;
+  descricao: string;
+  dador?: string; // NpcId que dá a missão
+  objetivos: { id: string; texto: string; flag: string }[];
+  recompensa: { dinheiro?: number; xp?: number; item?: string; reputacao?: { faccaoId: string; delta: number }[] };
+  prazoDias?: number;
+};
+
+export type QuestEstado = 'desconhecida' | 'ativa' | 'concluida' | 'falhada';
 
 // ── Estado serializável de uma campanha (GDD §34).
 export type Campaign = {
@@ -300,6 +435,18 @@ export type Campaign = {
     alvoNome?: string;
   };
   turno: number;
+  combate?: CombatState | null;
+  questEstado: Record<string, QuestEstado>;
+  // Rótulos de opção já oferecidos. A IA recebe a lista e fica proibida de
+  // repetir — opção repetida é o cheiro mais forte de jogo sem memória.
+  opcoesUsadas?: string[];
+  // Os grandes acontecimentos da campanha, para o narrador poder citar o que
+  // ficou para trás em vez de tratar cada turno como um episódio solto.
+  marcos?: { turno: number; dia: number; texto: string }[];
+  // O vale continua sem você: clima, evento corrente e carestia (ver mundo.ts).
+  mundo?: MundoState;
+  // O que aconteceu entre elas enquanto você não estava olhando.
+  ecos?: { turno: number; dia: number; local: string; texto: string; npcs: string[] }[];
 };
 
 export type { Periodo, Estacao, CalendarioState, RngState, Grau, PerfilDano };

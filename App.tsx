@@ -5,30 +5,29 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
 import { useFonts } from 'expo-font';
-import {
-  CormorantGaramond_400Regular,
-  CormorantGaramond_500Medium,
-  CormorantGaramond_600SemiBold,
-} from '@expo-google-fonts/cormorant-garamond';
-import { IBMPlexMono_400Regular, IBMPlexMono_500Medium } from '@expo-google-fonts/ibm-plex-mono';
 
 import { cores } from './ui/theme';
 import { useGame } from './ui/store';
 import { Entrada, Aviso17 } from './ui/screens/Onboarding';
 import { EscolhaCenario, EscolhaClasse, EscolhaOrigem, Criacao } from './ui/screens/Criacao';
 import { Jogo } from './ui/screens/Jogo';
-import { Ficha, Vinculos, Cronica, Mapa, Livro } from './ui/screens/Paineis';
+import { Ficha, Vinculos, Cronica, Mapa, Livro, Missoes } from './ui/screens/Paineis';
 import { FimCapitulo, Config } from './ui/screens/Sistema';
+import { Inventario } from './ui/screens/Inventario';
+import { Loja } from './ui/screens/Loja';
+import { Combate } from './ui/screens/Combate';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 export default function App() {
+  // Importa só os 5 pesos usados (via require do .ttf), evitando o barrel
+  // do @expo-google-fonts que empacotaria 24 fontes.
   const [fontesCarregadas] = useFonts({
-    CormorantGaramond_400Regular,
-    CormorantGaramond_500Medium,
-    CormorantGaramond_600SemiBold,
-    IBMPlexMono_400Regular,
-    IBMPlexMono_500Medium,
+    CormorantGaramond_400Regular: require('@expo-google-fonts/cormorant-garamond/400Regular/CormorantGaramond_400Regular.ttf'),
+    CormorantGaramond_500Medium: require('@expo-google-fonts/cormorant-garamond/500Medium/CormorantGaramond_500Medium.ttf'),
+    CormorantGaramond_600SemiBold: require('@expo-google-fonts/cormorant-garamond/600SemiBold/CormorantGaramond_600SemiBold.ttf'),
+    IBMPlexMono_400Regular: require('@expo-google-fonts/ibm-plex-mono/400Regular/IBMPlexMono_400Regular.ttf'),
+    IBMPlexMono_500Medium: require('@expo-google-fonts/ibm-plex-mono/500Medium/IBMPlexMono_500Medium.ttf'),
   });
 
   const pronto = useGame((s) => s.pronto);
@@ -85,6 +84,14 @@ function roteia(tela: string) {
       return <Cronica />;
     case 'config':
       return <Config />;
+    case 'inventario':
+      return <Inventario />;
+    case 'loja':
+      return <Loja />;
+    case 'combate':
+      return <Combate />;
+    case 'missoes':
+      return <Missoes />;
     case 'fimcapitulo':
       return <FimCapitulo />;
     default:

@@ -7,15 +7,18 @@ const K_CAMP = 'arcanum.campanha.v1';
 const K_CONFIG = 'arcanum.config.v1';
 
 export type ConfigApp = {
+  provider: 'openrouter' | 'anthropic';
   apiKey?: string;
   modelo: string;
+  /** @deprecated o narrador é obrigatório; mantido só para saves antigos. */
   usarModelo: boolean;
   avisoAceito: boolean;
 };
 
 export const configPadrao: ConfigApp = {
-  modelo: 'claude-haiku-4-5-20251001',
-  usarModelo: false,
+  provider: 'openrouter',
+  modelo: 'thedrummer/rocinante-12b',
+  usarModelo: true,
   avisoAceito: false,
 };
 

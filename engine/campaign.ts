@@ -3,6 +3,7 @@ import type { Campaign, ContentBundle, Atributos, NpcDinamico, LivroState } from
 import { createRng, seedFromString } from './rng';
 import { criarPersonagem } from './character';
 import { impulsosIniciais } from './impulsos';
+import { mundoInicial } from './mundo';
 
 export type EntradaCriacao = {
   nome: string;
@@ -49,6 +50,9 @@ export function criarCampanha(content: ContentBundle, entrada: EntradaCriacao): 
 
   const flags: Record<string, boolean | number | string> = { ...(origem.flagsIniciais ?? {}) };
 
+  const questEstado: Record<string, import('./types').QuestEstado> = {};
+  for (const q of content.quests) questEstado[q.id] = q.dador ? 'desconhecida' : 'ativa';
+
   const camp: Campaign = {
     id: `camp_${Date.now().toString(36)}`,
     cenarioId: content.cenario.id,
@@ -67,8 +71,12 @@ export function criarCampanha(content: ContentBundle, entrada: EntradaCriacao): 
     locaisVisitados: [content.localInicial],
     segredosRevelados: [],
     turno: 0,
+    combate: null,
+    questEstado,
   };
 
+  // O vale já começa com um tempo e um estado — nada nasce congelado.
+  camp.mundo = mundoInicial(camp);
   return camp;
 }
 

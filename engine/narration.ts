@@ -1,15 +1,17 @@
-// ARCANUM · Narração canônica de fallback (GDD §20, requisito P0).
-// Sem rede / com o modelo fora do ar, o jogo continua mais seco e NÃO trava.
-import type { Campaign, ContentBundle } from './types';
-import type { ResultadoTurno, OpcaoResolvida } from './turn';
+// ARCANUM · Montagem da cena.
+// Não existe mais narrador local: quem escreve é o modelo, sempre. Aqui só se
+// junta o material que ele recebe e as opções que servem de reserva quando ele
+// não devolve nenhuma.
+import type { Campaign, ContentBundle, NPC } from './types';
+import type { OpcaoResolvida } from './turn';
 import { calcularContexto, type Contexto } from './availability';
-import { pick, type RngState } from './rng';
 import { NOME_PERIODO } from './time';
 
-// O jogo NARRA, não descreve: registro seco, concreto (GDD §0.2).
+// A cena não é texto de tela: é o MATERIAL que o narrador recebe (atmosfera do
+// lugar naquele período e quem está presente) mais as opções de reserva. Quem
+// escreve prosa é sempre o modelo — este arquivo não narra mais nada.
 export function montarCena(content: ContentBundle, camp: Campaign): {
   narracao: string;
-  eco?: string;
   opcoes: OpcaoResolvida[];
   contexto: Contexto;
 } {
@@ -31,74 +33,145 @@ export function montarCena(content: ContentBundle, camp: Campaign): {
   return { narracao, opcoes, contexto: ctx };
 }
 
-// Narra o fato consumado devolvido pela engine (GDD §4.4).
-export function narrarResultado(camp: Campaign, r: ResultadoTurno): { narracao: string; eco?: string } {
-  const rng = camp.rng;
-  const base = r.fato;
-  const cor = corDaConsequencia(r);
-  const eco = ecoDeConsequencia(rng, r);
-  return { narracao: `${base} ${cor}`.trim(), eco };
+// Uma ação genérica não é uma escolha. Cada aproximação de um gancho tem um
+// jeito próprio, um risco próprio e um preço próprio (GDD §4.1).
+const APROXIMACOES: { verbo: string; risco: string; dificuldade: number }[] = [
+  { verbo: 'Chegar perto e olhar bem', risco: 'quem olha demais costuma ser notado', dificuldade: 11 },
+  { verbo: 'Estudar de longe, sem se mostrar', risco: 'seguro, mas você vai ver menos', dificuldade: 14 },
+  { verbo: 'Mexer no que não é seu', risco: 'se alguém vir, vira caso', dificuldade: 13 },
+  { verbo: 'Perguntar por aí sobre', risco: 'a pergunta anda mais rápido que você', dificuldade: 12 },
+];
+
+// Hash estável e barato: varia a cada turno sem tocar no RNG da campanha
+// (o cursor da semente é sagrado — mexer nele quebraria o determinismo).
+function estavel(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
 }
 
-function corDaConsequencia(r: ResultadoTurno): string {
-  if (!r.grau) return '';
-  switch (r.grau) {
-    case 'critico':
-      return 'Por um momento, tudo se encaixa.';
-    case 'sucesso':
-      return '';
-    case 'sucesso_com_custo':
-      return 'Ficou uma conta em aberto.';
-    case 'falha':
-      return 'Nada acontece — e isso também é uma resposta.';
-    case 'falha_grave':
-      return 'O silêncio depois é pior que o erro.';
-  }
+function minuscula(s: string): string {
+  return s.charAt(0).toLowerCase() + s.slice(1);
 }
 
-function ecoDeConsequencia(rng: RngState, r: ResultadoTurno): string | undefined {
-  const ecos: string[] = [];
-  for (const ef of r.efeitosAplicados) {
-    if (ef.tipo === 'pressao' && ef.delta > 0) ecos.push(`Algo em você cede um pouco.`);
-    if (ef.tipo === 'dinheiro' && ef.delta > 0) ecos.push(`As moedas pesam no bolso agora.`);
-    if (ef.tipo === 'dinheiro' && ef.delta < 0) ecos.push(`O bolso ficou mais leve.`);
-    if (ef.tipo === 'relacao' && ef.delta < 0) ecos.push(`Ficou uma frieza no ar.`);
-    if (ef.tipo === 'danoJogador') ecos.push(`A dor chega depois, sempre depois.`);
-    if (ef.tipo === 'revelarSegredo') ecos.push(`Agora você sabe de algo que não devia.`);
+// Como abordar alguém depende de quanto ela já confia em você e de quanto
+// você já sabe. É isso que faz a opção ter peso em vez de virar "conversar".
+function abordagem(
+  alvo: NPC,
+  confianca: number,
+  sabeSegredo: boolean,
+  turno: number,
+): { rotulo: string; dica: string; pericia: string; dificuldade: number; custo: number } {
+  if (sabeSegredo) {
+    return {
+      rotulo: `Deixar ${alvo.nome} entender que você sabe`,
+      dica: 'ou ela se abre de vez, ou vira inimiga hoje',
+      pericia: 'intimidar',
+      dificuldade: 16,
+      custo: 1,
+    };
   }
-  if (ecos.length === 0) return undefined;
-  return pick(rng, ecos);
+  if (confianca >= 12) {
+    return {
+      rotulo: `Perguntar a ${alvo.nome} o que ela não conta a ninguém`,
+      dica: 'a confiança está paga; talvez ela gaste',
+      pericia: 'persuadir',
+      dificuldade: 13,
+      custo: 1,
+    };
+  }
+  if (confianca >= 5) {
+    const variantes = [
+      { rotulo: `Levar ${alvo.nome} para um canto mais quieto`, dica: 'longe de ouvidos, a conversa muda', pericia: 'persuadir', dificuldade: 13, custo: 1 },
+      { rotulo: `Falar de ${alvo.ocupacao} com ${alvo.nome} até ela relaxar`, dica: 'ofício solta a língua', pericia: 'persuadir', dificuldade: 12, custo: 1 },
+    ];
+    return variantes[(estavel(alvo.id) + turno) % variantes.length];
+  }
+  const frias = [
+    {
+      rotulo: `Sondar ${alvo.nome} sem dizer o que você quer`,
+      dica: `${alvo.ocupacao}; ainda não confia em você`,
+      pericia: 'perceber',
+      dificuldade: 12,
+      custo: 0,
+    },
+    {
+      rotulo: `Pagar uma rodada a ${alvo.nome} e ver o que vem`,
+      dica: 'custa pouco; nem sempre compra alguma coisa',
+      pericia: 'persuadir',
+      dificuldade: 11,
+      custo: 1,
+    },
+    {
+      rotulo: `Observar ${alvo.nome} trabalhar antes de falar`,
+      dica: 'quem olha primeiro pergunta melhor depois',
+      pericia: 'perceber',
+      dificuldade: 13,
+      custo: 1,
+    },
+    {
+      rotulo: `Ir direto ao ponto com ${alvo.nome}`,
+      dica: 'sem rodeio: ela responde ou fecha a cara',
+      pericia: 'intimidar',
+      dificuldade: 15,
+      custo: 0,
+    },
+  ];
+  return frias[(estavel(alvo.id) + turno) % frias.length];
 }
 
 // Opções de cena canônicas por tipo de ponto (GDD §20). Situacionais, escritas à mão.
 function opcoesCanonicas(content: ContentBundle, camp: Campaign, ctx: Contexto): OpcaoResolvida[] {
   const out: OpcaoResolvida[] = [];
 
-  // Ganchos do local viram oportunidades de investigação.
-  ctx.local.ganchos.slice(0, 2).forEach((g, i) => {
+  // Ganchos do local que AINDA não foram investigados (§0.2: efeito que some
+  // não entra no jogo — investigar duas vezes o mesmo edital não é opção).
+  ctx.local.ganchos.forEach((g, i) => {
+    if (camp.flags[`investigado.${ctx.local.id}.${i}`]) return;
+    const forma = APROXIMACOES[(estavel(ctx.local.id + i) + camp.turno) % APROXIMACOES.length];
     out.push({
       id: `gancho_${i}`,
-      rotulo: g,
-      dica: 'ver de perto pode revelar algo',
+      rotulo: `${forma.verbo}: ${minuscula(g)}`,
+      dica: forma.risco,
       custoPeriodos: 0,
       origem: 'cena',
-      teste: { atributo: 'percepcao', pericia: 'perceber', dificuldade: 12 },
+      teste: { atributo: 'percepcao', pericia: 'perceber', dificuldade: forma.dificuldade },
       efeitos: [{ tipo: 'flag', chave: `investigado.${ctx.local.id}.${i}`, valor: true }],
     });
   });
 
-  // Um NPC presente convida a uma abordagem específica.
-  const alvo = ctx.presentes[0];
-  if (alvo) {
+  // Cada pessoa presente é uma porta — não só a primeira. E a porta muda de
+  // forma conforme o que já se sabe dela: sondar quem não confia em você não é
+  // a mesma coisa que cobrar de quem já se abriu.
+  ctx.presentes.slice(0, 3).forEach((alvo) => {
+    const din = camp.npcState[alvo.id];
+    const confianca = din?.eixos.confianca ?? 0;
+    const sabeSegredo = camp.segredosRevelados.includes(alvo.id);
+    const forma = abordagem(alvo, confianca, sabeSegredo, camp.turno);
     out.push({
       id: `abordar_${alvo.id}`,
-      rotulo: `Puxar assunto com ${alvo.nome}`,
-      dica: `${alvo.ocupacao}; pode saber de algo`,
-      custoPeriodos: 0,
+      rotulo: forma.rotulo,
+      dica: forma.dica,
+      custoPeriodos: forma.custo,
       origem: 'cena',
-      teste: { atributo: 'social', pericia: 'persuadir', dificuldade: 12 },
+      teste: { atributo: 'social', pericia: forma.pericia, dificuldade: forma.dificuldade },
       efeitos: [{ tipo: 'relacao', npc: alvo.id, eixo: content.cenario.eixosRelacao[0].id, delta: 3 }],
     });
+  });
+
+  // Se já vasculhou tudo aqui, o lugar oferece a saída como opção viva.
+  if (out.length === 0) {
+    const rota = ctx.local.rotas[0];
+    if (rota) {
+      out.push({
+        id: 'sair_daqui',
+        rotulo: 'Procurar o que fazer em outro lugar',
+        dica: 'este canto já deu o que tinha',
+        custoPeriodos: 0,
+        origem: 'cena',
+        efeitos: [{ tipo: 'flag', chave: 'quer.sair', valor: true }],
+      });
+    }
   }
 
   // Deixar o período correr é sempre uma escolha.

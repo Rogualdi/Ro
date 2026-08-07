@@ -1,6 +1,14 @@
 // ARCANUM · A tela de jogo. As três portas: a cena, as ações, a ação livre (GDD §4, §31).
 import React, { useState, useMemo } from 'react';
-import { View, Text, StyleSheet, Pressable, TextInput, ScrollView } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Pressable,
+  TextInput,
+  ScrollView,
+  ActivityIndicator,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CabecalhoJogo } from './_layout';
 import { TextoSerif, TextoMono, Divisor, Rotulo } from '../components';
@@ -16,8 +24,16 @@ import {
   NOME_CATEGORIA,
   type CategoriaVerbo,
   type Verbo,
+  emBlocos,
+  estadoDoNpc,
+  comoEstaOVale,
+  marcosRecentes,
+  avaliarOpcao,
+  NOME_NATUREZA,
+  type Aposta,
   type OpcaoResolvida,
   type NPC,
+  type Campaign,
 } from '@/engine';
 
 const ORDEM_CATEGORIAS: CategoriaVerbo[] = [
@@ -44,8 +60,38 @@ export function Jogo() {
   const [texto, setTexto] = useState('');
   const [catAberta, setCatAberta] = useState<CategoriaVerbo | null>(null);
   const [verboAlvo, setVerboAlvo] = useState<Verbo | null>(null);
+  const iaStatus = useGame((s) => s.iaStatus);
+  const iaErro = useGame((s) => s.iaErro);
+  // O narrador é obrigatório: ter chave é ter jogo.
+  const iaLigada = useGame((s) => !!s.config.apiKey);
+  const tentarNarrarDeNovo = useGame((s) => s.tentarNarrarDeNovo);
+  // Turno resolvido esperando prosa: enquanto existir, ninguém age.
+  const pendente = useGame((s) => s.pendente);
+  const irPara = useGame((s) => s.irPara);
 
   const ctx = cena?.contexto;
+
+  // Nomes que o narrador pode citar — servem para saber de quem é cada fala.
+  const nomesConhecidos = useMemo(() => {
+    if (!content) return [] as string[];
+    const set = new Set<string>();
+    for (const n of content.npcs) {
+      set.add(n.nome);
+      const primeiro = n.nome.split(/[,\s]/)[0];
+      if (primeiro.length > 2) set.add(primeiro);
+    }
+    return [...set].sort((a, b) => b.length - a.length);
+  }, [content]);
+
+  // O que está aberto agora, sempre à vista: o jogador não devia precisar
+  // rolar o histórico para lembrar o que estava fazendo.
+  const objetivosAtivos = useMemo(() => {
+    if (!content || !camp) return [] as string[];
+    return content.quests
+      .filter((q) => camp.questEstado[q.id] === 'ativa')
+      .flatMap((q) => q.objetivos.filter((o) => !camp.flags[o.flag]).map((o) => o.texto))
+      .slice(0, 3);
+  }, [content, camp]);
 
   const porCategoria = useMemo(() => {
     const m = new Map<CategoriaVerbo, Verbo[]>();
@@ -69,6 +115,8 @@ export function Jogo() {
   const p = camp.personagem;
   const local = ctx.local;
   const periodo = ctx.periodo;
+  // Sem narrador não se age: a engine resolveria, mas ninguém escreveria.
+  const podeAgir = iaLigada && !pendente;
 
   function executarVerbo(v: Verbo) {
     if (v.alvo === 'pessoa') {
@@ -97,6 +145,9 @@ export function Jogo() {
             testemunhas={ctx.testemunhas}
             vida={p.recursos.vida}
             vidaMax={p.recursosMax.vida}
+            vale={comoEstaOVale(camp)}
+            objetivos={objetivosAtivos}
+            aconteceu={marcosRecentes(camp, 2)}
           />
         </View>
 
@@ -107,24 +158,96 @@ export function Jogo() {
           showsVerticalScrollIndicator={false}
         >
           {feed.map((e, i) => (
-            <EntradaNarrativa key={e.id} entrada={e} primeira={i === 0} />
+            <EntradaNarrativa key={e.id} entrada={e} primeira={i === 0} nomes={nomesConhecidos} />
           ))}
 
-          <Divisor label="a cena" />
-          <TextoSerif style={styles.situacao}>{cena.narracao}</TextoSerif>
-
-          {/* PORTA 1 — opções de cena */}
-          {cena.opcoes.length > 0 && (
-            <View style={{ marginTop: esp.md }}>
-              {cena.opcoes.map((op) => (
-                <OpcaoCena key={op.id} op={op} onPress={() => agirOpcao(op, ctx.presentes[0]?.id)} />
-              ))}
+          {/* O narrador é obrigatório: sem ele não há prosa nem escolha. */}
+          {!iaLigada ? (
+            <View style={styles.semNarradorBox}>
+              <Text style={styles.semNarradorTitulo}>A história está parada</Text>
+              <Text style={styles.semNarradorTexto}>
+                Quem escreve ARCANUM é o narrador. Sem uma chave de API salva, não existe
+                texto de reserva — o jogo espera.
+              </Text>
+              <Pressable style={styles.botaoOuro} onPress={() => irPara('config')}>
+                <Text style={styles.botaoOuroTxt}>Abrir Configurações</Text>
+              </Pressable>
             </View>
+          ) : ocupado ? (
+            <View style={styles.gerandoBox}>
+              <ActivityIndicator color={cores.ouro} size="large" />
+              <Text style={styles.gerandoTitulo}>O narrador está escrevendo…</Text>
+              <Text style={styles.gerandoSub}>as novas opções aparecem em instantes</Text>
+            </View>
+          ) : pendente ? (
+            <View style={styles.falhaBox}>
+              <Text style={styles.falhaTitulo}>O narrador não respondeu</Text>
+              <Text style={styles.falhaMotivo}>{iaErro ?? 'sem resposta'}</Text>
+              <Text style={styles.falhaTexto}>
+                Seu turno está guardado — nada se perdeu. Tente de novo, ou troque de modelo
+                em Configurações.
+              </Text>
+              <View style={styles.falhaBotoes}>
+                <Pressable style={styles.botaoOuro} onPress={() => tentarNarrarDeNovo()}>
+                  <Text style={styles.botaoOuroTxt}>Tentar de novo</Text>
+                </Pressable>
+                <Pressable style={styles.botaoVazio} onPress={() => irPara('config')}>
+                  <Text style={styles.botaoVazioTxt}>Configurações</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            cena.opcoes.length > 0 && (
+              <>
+                <Divisor label="o que você faz" />
+                <View style={{ marginTop: esp.md }}>
+                  {cena.opcoes.map((op) => (
+                    <OpcaoCena
+                      key={op.id}
+                      op={op}
+                      aposta={avaliarOpcao(content, camp, op, { testemunhas: ctx.testemunhas })}
+                      onPress={() => agirOpcao(op, ctx.presentes[0]?.id)}
+                    />
+                  ))}
+                  {/* A ação livre é a última porta, e mora na mesma vitrine:
+                      para o jogador é tudo um sistema só. */}
+                  <View style={styles.livreCartao}>
+                    <Text style={styles.opcaoEixo}>escrever a sua</Text>
+                    <View style={styles.livreWrap}>
+                      <TextInput
+                        style={styles.livreInput}
+                        value={texto}
+                        onChangeText={setTexto}
+                        placeholder="descreva o que você faz…"
+                        placeholderTextColor={cores.linha}
+                        multiline
+                      />
+                      <Pressable
+                        style={styles.livreBtn}
+                        onPress={() => {
+                          if (texto.trim()) {
+                            acaoLivre(texto);
+                            setTexto('');
+                          }
+                        }}
+                      >
+                        <Text style={styles.livreBtnTxt}>Agir</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                </View>
+              </>
+            )
           )}
 
-          {/* PORTA 2 — o catálogo de ações */}
+          {/* PORTA 2 — o catálogo de ações. Também trancado sem narrador: a
+              engine até resolveria, mas ninguém escreveria o que aconteceu. */}
           <Divisor label="ações" />
-          {ORDEM_CATEGORIAS.map((cat) => {
+          {ocupado && <Text style={styles.travado}>ações bloqueadas enquanto a cena é escrita</Text>}
+          {!ocupado && !podeAgir && (
+            <Text style={styles.travado}>ações bloqueadas até o narrador voltar</Text>
+          )}
+          {!ocupado && podeAgir && ORDEM_CATEGORIAS.map((cat) => {
             const verbos = porCategoria.get(cat);
             if (!verbos || verbos.length === 0) return null;
             const aberta = catAberta === cat;
@@ -158,29 +281,6 @@ export function Jogo() {
             );
           })}
 
-          {/* PORTA 3 — ação livre */}
-          <Divisor label="ação livre" />
-          <View style={styles.livreWrap}>
-            <TextInput
-              style={styles.livreInput}
-              value={texto}
-              onChangeText={setTexto}
-              placeholder="descreva o que você faz…"
-              placeholderTextColor={cores.linha}
-              multiline
-            />
-            <Pressable
-              style={styles.livreBtn}
-              onPress={() => {
-                if (texto.trim() && !ocupado) {
-                  acaoLivre(texto);
-                  setTexto('');
-                }
-              }}
-            >
-              <Text style={styles.livreBtnTxt}>Agir</Text>
-            </Pressable>
-          </View>
           <View style={{ height: esp.xxl }} />
         </ScrollView>
       </View>
@@ -190,6 +290,7 @@ export function Jogo() {
         <SeletorAlvo
           verbo={verboAlvo}
           presentes={ctx.presentes}
+          camp={camp}
           onEscolher={(id) => {
             agirVerbo(verboAlvo.id, id);
             setVerboAlvo(null);
@@ -210,7 +311,11 @@ function FaixaContexto(props: {
   testemunhas: number;
   vida: number;
   vidaMax: number;
+  vale: { clima: string; estacao: string; evento?: string; carestia?: string };
+  objetivos: string[];
+  aconteceu: string[];
 }) {
+  const [aberto, setAberto] = useState(true);
   return (
     <View style={styles.faixa}>
       <View style={styles.faixaLinha}>
@@ -220,33 +325,164 @@ function FaixaContexto(props: {
         </Text>
       </View>
       <Text style={styles.faixaData}>
-        {props.data} · {props.periodo}
+        {props.data} · {props.periodo} · {props.vale.clima}
       </Text>
       <Text style={styles.faixaMeta}>
         privacidade {props.privacidade} · {props.testemunhas === 0 ? 'ninguém te vê' : `${props.testemunhas} olhos`}
+        {props.vale.carestia ? ` · ${props.vale.carestia}` : ''}
       </Text>
+
+      {aberto && (
+        <>
+          {!!props.vale.evento && (
+            <Text style={styles.hudEvento} numberOfLines={2}>
+              {props.vale.evento}
+            </Text>
+          )}
+          {props.objetivos.length > 0 && (
+            <View style={styles.hudBloco}>
+              <Text style={styles.hudTitulo}>o que está aberto</Text>
+              {props.objetivos.map((o, i) => (
+                <Text key={i} style={styles.hudItem} numberOfLines={1}>
+                  · {o}
+                </Text>
+              ))}
+            </View>
+          )}
+          {props.aconteceu.length > 0 && (
+            <View style={styles.hudBloco}>
+              <Text style={styles.hudTitulo}>ficou para trás</Text>
+              {props.aconteceu.map((o, i) => (
+                <Text key={i} style={styles.hudItem} numberOfLines={1}>
+                  · {o}
+                </Text>
+              ))}
+            </View>
+          )}
+        </>
+      )}
+      <Pressable onPress={() => setAberto(!aberto)} hitSlop={8}>
+        <Text style={styles.hudPuxador}>{aberto ? '— recolher' : '+ o que está aberto'}</Text>
+      </Pressable>
     </View>
   );
 }
 
-function EntradaNarrativa({ entrada, primeira }: { entrada: EntradaFeed; primeira: boolean }) {
+function EntradaNarrativa({
+  entrada,
+  primeira,
+  nomes,
+}: {
+  entrada: EntradaFeed;
+  primeira: boolean;
+  nomes: string[];
+}) {
+  // Cada ação abre um bloco visível: o jogador precisa ver onde um turno
+  // terminou e o outro começou.
+  const marca = entrada.abreTurno ? (
+    <View style={styles.marcaTurno}>
+      <View style={styles.marcaRegua} />
+      {!!entrada.cabecalho && <Text style={styles.marcaTexto}>{entrada.cabecalho}</Text>}
+      <View style={styles.marcaRegua} />
+    </View>
+  ) : null;
+
   if (entrada.tipo === 'sistema') {
-    return <TextoMono style={styles.sistema}>{entrada.texto}</TextoMono>;
+    // Falhas de IA precisam saltar aos olhos — antes ficavam num cinza invisível.
+    const alerta = entrada.texto.startsWith('IA ');
+    return (
+      <>
+        {marca}
+        <TextoMono style={[styles.sistema, alerta && styles.sistemaAlerta]}>{entrada.texto}</TextoMono>
+      </>
+    );
   }
   if (entrada.tipo === 'acao') {
-    return <Text style={styles.acao}>{entrada.texto}</Text>;
+    return (
+      <>
+        {marca}
+        <View style={styles.acaoCartao}>
+          <Text style={styles.acaoRotulo}>você</Text>
+          <TextoSerif style={styles.acaoTexto}>{entrada.texto}</TextoSerif>
+        </View>
+      </>
+    );
   }
   if (entrada.tipo === 'eco') {
-    return <Text style={styles.eco}>{entrada.texto}</Text>;
+    return (
+      <>
+        {marca}
+        <Text style={styles.eco}>{entrada.texto}</Text>
+      </>
+    );
   }
-  return <TextoSerif style={[styles.narracao, primeira ? styles.narracaoPrimeira : null]}>{entrada.texto}</TextoSerif>;
+
+  // Narração: vira parágrafos e falas separadas. Nada de parede de texto.
+  const blocos = emBlocos(entrada.texto, nomes);
+  return (
+    <>
+      {marca}
+      <View style={styles.narrBloco}>
+        {blocos.map((b, i) =>
+          b.tipo === 'fala' ? (
+            <View key={i} style={styles.falaWrap}>
+              {!!b.quem && <Text style={styles.falaQuem}>{b.quem}</Text>}
+              <TextoSerif style={styles.falaTexto}>{b.texto}</TextoSerif>
+            </View>
+          ) : (
+            <TextoSerif
+              key={i}
+              style={[styles.narracao, primeira && i === 0 ? styles.narracaoPrimeira : null]}
+            >
+              {b.texto}
+            </TextoSerif>
+          ),
+        )}
+      </View>
+    </>
+  );
 }
 
-function OpcaoCena({ op, onPress }: { op: OpcaoResolvida; onPress: () => void }) {
+function OpcaoCena({
+  op,
+  aposta,
+  onPress,
+}: {
+  op: OpcaoResolvida;
+  aposta: Aposta;
+  onPress: () => void;
+}) {
+  const daIA = op.origem === 'ia';
+  // A aposta é a MESMA conta que resolve o turno, dita em palavra. Sem número
+  // na tela e sem mentira: se diz "no fio", a curva diz isso.
+  const selos = [aposta.chance, aposta.custo, aposta.perigo].filter(Boolean) as string[];
   return (
-    <Pressable style={({ pressed }) => [styles.opcao, pressed && { opacity: 0.7 }]} onPress={onPress}>
-      <Text style={styles.opcaoRotulo}>{op.rotulo}</Text>
+    <Pressable
+      style={({ pressed }) => [styles.opcao, daIA && styles.opcaoIA, pressed && { opacity: 0.7 }]}
+      onPress={onPress}
+    >
+      {!!op.natureza && <Text style={styles.opcaoEixo}>{NOME_NATUREZA[op.natureza]}</Text>}
+      <Text style={styles.opcaoRotulo}>
+        {daIA && <Text style={styles.marcaIA}>✦ </Text>}
+        {op.rotulo}
+      </Text>
       {op.dica && <Text style={styles.opcaoDica}>{op.dica}</Text>}
+      {selos.length > 0 && (
+        <View style={styles.selos}>
+          {selos.map((t, i) => (
+            <Text
+              key={i}
+              style={[
+                styles.selo,
+                t === aposta.chance && styles.seloChance,
+                t === aposta.perigo && styles.seloPerigo,
+              ]}
+            >
+              {t}
+            </Text>
+          ))}
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -292,11 +528,13 @@ function LinhaVerbo({
 function SeletorAlvo({
   verbo,
   presentes,
+  camp,
   onEscolher,
   onCancelar,
 }: {
   verbo: Verbo;
   presentes: NPC[];
+  camp: Campaign;
   onEscolher: (id: string) => void;
   onCancelar: () => void;
 }) {
@@ -309,6 +547,8 @@ function SeletorAlvo({
           <Pressable key={n.id} style={styles.alvoLinha} onPress={() => onEscolher(n.id)}>
             <Text style={styles.alvoNome}>{n.nome}</Text>
             <Text style={styles.alvoOcup}>{n.ocupacao}</Text>
+            {/* Escolher pelo nome é escolher no escuro: aqui vai o estado dela. */}
+            <TextoSerif style={styles.alvoEstado}>{estadoDoNpc(camp, n)}</TextoSerif>
           </Pressable>
         ))}
         <Pressable style={styles.alvoCancelar} onPress={onCancelar}>
@@ -337,12 +577,94 @@ const styles = StyleSheet.create({
   faixaVida: { fontFamily: fontes.mono, color: cores.cinabrio, fontSize: 12 },
   faixaData: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 11, marginTop: 2 },
   faixaMeta: { fontFamily: fontes.mono, color: cores.linha, fontSize: 10, marginTop: 1 },
-  narracao: { color: cores.vellum, marginBottom: esp.md, fontSize: 20, lineHeight: 30 },
+  hudEvento: {
+    fontFamily: fontes.mono,
+    color: cores.ouro,
+    fontSize: 10,
+    marginTop: esp.xs,
+    lineHeight: 14,
+  },
+  hudBloco: { marginTop: esp.xs },
+  hudTitulo: {
+    fontFamily: fontes.mono,
+    color: cores.linha,
+    fontSize: 8,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+  },
+  hudItem: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 10, lineHeight: 14 },
+  hudPuxador: {
+    fontFamily: fontes.mono,
+    color: cores.linha,
+    fontSize: 9,
+    marginTop: esp.xs,
+    alignSelf: 'flex-end',
+  },
+  narrBloco: { marginBottom: esp.lg },
+  narracao: { color: cores.vellum, marginBottom: esp.md, fontSize: 20, lineHeight: 31 },
   narracaoPrimeira: { fontSize: 21 },
+  // Fala: recuada, com o nome de quem falou acima. É o que separa boca de prosa.
+  falaWrap: {
+    marginLeft: esp.md,
+    marginBottom: esp.md,
+    paddingLeft: esp.md,
+    borderLeftWidth: 2,
+    borderLeftColor: cores.couro,
+  },
+  falaQuem: {
+    fontFamily: fontes.mono,
+    color: cores.ouro,
+    fontSize: 10,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  falaTexto: { color: cores.vellum, fontSize: 20, lineHeight: 30, fontStyle: 'italic' },
+  // Régua que abre cada turno.
+  marcaTurno: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: esp.sm,
+    marginTop: esp.lg,
+    marginBottom: esp.md,
+  },
+  marcaRegua: { flex: 1, height: 1, backgroundColor: cores.fundo3 },
+  marcaTexto: {
+    fontFamily: fontes.mono,
+    color: cores.mudo,
+    fontSize: 9,
+    letterSpacing: 2,
+    textTransform: 'lowercase',
+  },
+  // A escolha do jogador, como cartão da interface — nunca como texto narrado.
+  acaoCartao: {
+    borderLeftWidth: 2,
+    borderLeftColor: cores.verdigris,
+    paddingLeft: esp.md,
+    paddingVertical: esp.xs,
+    marginBottom: esp.md,
+  },
+  acaoRotulo: {
+    fontFamily: fontes.mono,
+    color: cores.verdigris,
+    fontSize: 9,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+  },
+  acaoTexto: { color: cores.vellum, fontSize: 17, lineHeight: 24 },
   situacao: { color: cores.vellum, fontStyle: 'italic', fontSize: 19, lineHeight: 28 },
+  iaAviso: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 11, marginBottom: esp.sm },
+  iaErro: { fontFamily: fontes.mono, color: cores.cinabrio, fontSize: 11, marginBottom: esp.sm },
   eco: { fontFamily: fontes.serif, color: cores.ouro, fontStyle: 'italic', fontSize: 17, marginBottom: esp.md },
-  sistema: { color: cores.linha, marginBottom: esp.sm, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 },
-  acao: { fontFamily: fontes.monoMedium, color: cores.verdigris, fontSize: 13, marginBottom: esp.sm },
+  sistema: { color: cores.mudo, marginBottom: esp.sm, fontSize: 11, letterSpacing: 0.5 },
+  sistemaAlerta: {
+    color: cores.cinabrio,
+    fontSize: 12,
+    borderLeftWidth: 2,
+    borderLeftColor: cores.cinabrio,
+    paddingLeft: esp.sm,
+    textTransform: 'none',
+  },
   opcao: {
     borderWidth: 1,
     borderColor: cores.linha,
@@ -351,8 +673,88 @@ const styles = StyleSheet.create({
     marginBottom: esp.sm,
     backgroundColor: cores.fundo2,
   },
+  opcaoIA: { borderColor: cores.ouro, backgroundColor: cores.fundo3 },
+  marcaIA: { color: cores.ouro },
   opcaoRotulo: { fontFamily: fontes.serifMedium, color: cores.vellum, fontSize: 18 },
+  gerandoBox: {
+    marginTop: esp.lg,
+    paddingVertical: esp.xl,
+    paddingHorizontal: esp.lg,
+    borderWidth: 1,
+    borderColor: cores.ouro,
+    borderRadius: raio.md,
+    backgroundColor: cores.fundo2,
+    alignItems: 'center',
+    gap: esp.sm,
+  },
+  gerandoTitulo: { fontFamily: fontes.serifSemi, color: cores.ouro, fontSize: 22, marginTop: esp.sm },
+  gerandoSub: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 12 },
+  travado: { fontFamily: fontes.mono, color: cores.linha, fontSize: 11, paddingVertical: esp.md },
+  semNarradorBox: {
+    marginTop: esp.lg,
+    padding: esp.lg,
+    borderWidth: 1,
+    borderColor: cores.linha,
+    borderRadius: raio.md,
+    backgroundColor: cores.fundo2,
+    gap: esp.sm,
+  },
+  semNarradorTitulo: { fontFamily: fontes.serifSemi, color: cores.vellum, fontSize: 21 },
+  semNarradorTexto: { fontFamily: fontes.serif, color: cores.mudo, fontSize: 16, lineHeight: 23 },
+  falhaBox: {
+    marginTop: esp.lg,
+    padding: esp.lg,
+    borderWidth: 1,
+    borderColor: cores.cinabrio,
+    borderRadius: raio.md,
+    backgroundColor: cores.fundo2,
+    gap: esp.sm,
+  },
+  falhaTitulo: { fontFamily: fontes.serifSemi, color: cores.cinabrio, fontSize: 21 },
+  falhaMotivo: { fontFamily: fontes.mono, color: cores.cinabrio, fontSize: 12, lineHeight: 17 },
+  falhaTexto: { fontFamily: fontes.serif, color: cores.mudo, fontSize: 16, lineHeight: 23 },
+  falhaBotoes: { flexDirection: 'row', gap: esp.sm, marginTop: esp.xs, flexWrap: 'wrap' },
+  botaoOuro: {
+    backgroundColor: cores.couro,
+    borderWidth: 1,
+    borderColor: cores.ouro,
+    borderRadius: raio.md,
+    paddingHorizontal: esp.lg,
+    paddingVertical: esp.md,
+    alignSelf: 'flex-start',
+  },
+  botaoOuroTxt: { fontFamily: fontes.serifMedium, color: cores.ouro, fontSize: 17 },
+  botaoVazio: {
+    borderWidth: 1,
+    borderColor: cores.linha,
+    borderRadius: raio.md,
+    paddingHorizontal: esp.lg,
+    paddingVertical: esp.md,
+    alignSelf: 'flex-start',
+  },
+  botaoVazioTxt: { fontFamily: fontes.serifMedium, color: cores.mudo, fontSize: 17 },
   opcaoDica: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 11, marginTop: 2 },
+  opcaoEixo: {
+    fontFamily: fontes.mono,
+    color: cores.linha,
+    fontSize: 9,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    marginBottom: 3,
+  },
+  selos: { flexDirection: 'row', flexWrap: 'wrap', gap: esp.xs, marginTop: esp.sm },
+  selo: {
+    fontFamily: fontes.mono,
+    fontSize: 10,
+    color: cores.mudo,
+    borderWidth: 1,
+    borderColor: cores.fundo3,
+    borderRadius: raio.sm,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  seloChance: { color: cores.vellum, borderColor: cores.linha },
+  seloPerigo: { color: cores.cinabrio, borderColor: cores.cinabrio },
   catCabecalho: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -373,6 +775,15 @@ const styles = StyleSheet.create({
   verboNome: { fontFamily: fontes.serifMedium, color: cores.vellum, fontSize: 17 },
   verboIndisp: { color: cores.linha, textDecorationLine: 'line-through' },
   verboMeta: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 10, marginTop: 1, fontStyle: 'italic' },
+  livreCartao: {
+    borderWidth: 1,
+    borderColor: cores.linha,
+    borderStyle: 'dashed',
+    borderRadius: raio.md,
+    padding: esp.md,
+    marginBottom: esp.sm,
+    backgroundColor: cores.fundo2,
+  },
   livreWrap: { flexDirection: 'row', gap: esp.sm, alignItems: 'flex-end' },
   livreInput: {
     flex: 1,
@@ -421,6 +832,7 @@ const styles = StyleSheet.create({
   },
   alvoNome: { fontFamily: fontes.serifMedium, color: cores.vellum, fontSize: 20 },
   alvoOcup: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 11 },
+  alvoEstado: { color: cores.ouro, fontSize: 15, fontStyle: 'italic', marginTop: 2 },
   alvoCancelar: { marginTop: esp.md, alignItems: 'center' },
   alvoCancelarTxt: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 12 },
 });

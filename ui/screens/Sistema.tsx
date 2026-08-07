@@ -1,10 +1,30 @@
 // ARCANUM · Fim de capítulo (paywall diegético) e Configurações (GDD §26, §28, §33, §36).
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, Switch, Pressable } from 'react-native';
+import { View, Text, StyleSheet, TextInput, Pressable } from 'react-native';
 import { Pagina, BarraVoltar } from './_layout';
 import { Titulo, TextoSerif, TextoMono, Botao, Card, Divisor, Rotulo, Carregando } from '../components';
-import { cores, fontes, esp } from '../theme';
+import { cores, fontes, esp, raio } from '../theme';
 import { useGame } from '../store';
+import type { ModeloOR } from '@/engine';
+import {
+  SUGESTOES_OPENROUTER,
+  MODELO_PADRAO_OPENROUTER,
+  MODELO_PADRAO_ANTHROPIC,
+  perfilDoModelo,
+  MODELOS_PARA_CENA_ADULTA,
+} from '@/engine';
+
+// As sugestões estáticas entram na mesma vitrine dos modelos vivos.
+function comoModelo(id: string): ModeloOR {
+  return {
+    id,
+    nome: id,
+    free: id.endsWith(':free'),
+    moderado: false,
+    perfil: perfilDoModelo(id),
+    contexto: 0,
+  };
+}
 
 // ─────────────────────────────────────────────── FIM DE CAPÍTULO
 export function FimCapitulo() {
@@ -75,11 +95,42 @@ export function Config() {
   const temSave = useGame((s) => s.temSave);
   const irPara = useGame((s) => s.irPara);
 
+  const buscarModelos = useGame((s) => s.buscarModelosGratis);
+  const testarAdultoStore = useGame((s) => s.testarSeNarraAdulto);
+  const testarNarr = useGame((s) => s.testarNarracaoReal);
   const [chave, setChave] = useState(config.apiKey ?? '');
   const [modelo, setModelo] = useState(config.modelo);
   const [testando, setTestando] = useState(false);
   const [resultado, setResultado] = useState<string | null>(null);
   const [confirmarApagar, setConfirmarApagar] = useState(false);
+  const [modelosVivos, setModelosVivos] = useState<ModeloOR[] | null>(null);
+  const [buscando, setBuscando] = useState(false);
+
+  const provider = config.provider;
+
+  async function buscar() {
+    setBuscando(true);
+    setResultado(null);
+    const lista = await buscarModelos();
+    setBuscando(false);
+    if (lista.length === 0) {
+      setResultado('Não consegui buscar a lista (sem rede ou chave inválida). Use as sugestões.');
+    } else {
+      setModelosVivos(lista);
+      const semFiltro = lista.filter((m) => m.perfil === 'permissivo' && !m.moderado).length;
+      setResultado(
+        `${lista.length} modelos que servem para narrar (música, código e classificadores ` +
+          `foram descartados). ${semFiltro} costumam escrever cena adulta — são os de cima.`,
+      );
+    }
+  }
+
+  async function trocarProvider(p: 'openrouter' | 'anthropic') {
+    const novoModelo = p === 'openrouter' ? MODELO_PADRAO_OPENROUTER : MODELO_PADRAO_ANTHROPIC;
+    setModelo(novoModelo);
+    setResultado(null);
+    await setConfig({ provider: p, modelo: novoModelo });
+  }
 
   async function salvarChave() {
     await setConfig({ apiKey: chave.trim() || undefined, modelo: modelo.trim() });
@@ -94,50 +145,210 @@ export function Config() {
     setResultado(r.ok ? 'Chave válida — narração ao vivo pronta.' : `Falhou: ${r.erro}`);
   }
 
+  // A pergunta que nenhum slug responde. Aqui a gente pergunta ao modelo.
+  async function testarAdulto() {
+    await salvarChave();
+    setTestando(true);
+    setResultado(null);
+    const r = await testarAdultoStore();
+    setTestando(false);
+    if (r.erro) {
+      setResultado(`NÃO DEU PARA TESTAR: ${r.erro}`);
+      return;
+    }
+    if (r.recusou) {
+      setResultado(
+        'ESTE MODELO RECUSA.\n\nEle respondeu com um pedido de desculpas em vez da cena:\n\n' +
+          `"${r.amostra}…"\n\n` +
+          'Escolha um modelo com a etiqueta verde "costuma narrar sexo" e teste de novo.',
+      );
+      return;
+    }
+    setResultado(
+      `ESTE MODELO NARRA. Ele escreveu a cena pedida:\n\n"${r.amostra}…"\n\n` +
+        'Pode voltar ao jogo.',
+    );
+  }
+
+  async function testarNarracao() {
+    await salvarChave();
+    setTestando(true);
+    setResultado(null);
+    const r = await testarNarr();
+    setTestando(false);
+    if (r.ok) {
+      setResultado(
+        `FUNCIONOU (${r.modelo}). A IA escreveu:\n\n"${r.amostra}…"\n\n` +
+          'Agora ligue o botão acima e volte ao jogo.',
+      );
+    } else {
+      setResultado(`NÃO FUNCIONOU: ${r.erro}`);
+    }
+  }
+
+  const ehOR = provider === 'openrouter';
+
   return (
     <Pagina>
       <BarraVoltar titulo="Configurações" />
 
-      <Divisor label="Narração por IA" />
+      <Divisor label="O narrador" />
       <TextoSerif style={styles.explica}>
-        Por padrão, ARCANUM narra offline com a biblioteca canônica da engine. Você pode ligar a
-        narração ao vivo usando a sua própria chave da API da Anthropic.
+        Quem escreve ARCANUM é o modelo — não existe narração de reserva. Sem uma chave
+        salva aqui, a história não anda. Recomendado: OpenRouter, que dá acesso a modelos
+        gratuitos e sem filtro. A chave fica só neste aparelho e nunca vai no APK.
       </TextoSerif>
 
-      <View style={styles.switchRow}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.switchNome}>Usar o modelo para narrar</Text>
-          <TextoMono>quando houver chave e internet</TextoMono>
-        </View>
-        <Switch
-          value={config.usarModelo}
-          onValueChange={(v) => setConfig({ usarModelo: v })}
-          trackColor={{ true: cores.verdigris, false: cores.linha }}
-          thumbColor={cores.vellum}
-        />
+      <View style={[styles.estadoBox, config.apiKey ? styles.estadoOk : styles.estadoFalta]}>
+        <Text style={[styles.estadoTxt, config.apiKey ? styles.estadoTxtOk : styles.estadoTxtFalta]}>
+          {config.apiKey ? 'Narrador ativo — a história pode andar.' : 'Sem chave: a história está parada.'}
+        </Text>
       </View>
 
-      <Rotulo>Chave da API (x-api-key)</Rotulo>
+      <Rotulo>Provedor</Rotulo>
+      <View style={styles.providerRow}>
+        <Pressable
+          style={[styles.provBtn, ehOR && styles.provBtnAtivo]}
+          onPress={() => trocarProvider('openrouter')}
+        >
+          <Text style={[styles.provTxt, ehOR && styles.provTxtAtivo]}>OpenRouter</Text>
+          <Text style={styles.provSub}>grátis · sem filtro</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.provBtn, !ehOR && styles.provBtnAtivo]}
+          onPress={() => trocarProvider('anthropic')}
+        >
+          <Text style={[styles.provTxt, !ehOR && styles.provTxtAtivo]}>Anthropic</Text>
+          <Text style={styles.provSub}>Claude</Text>
+        </Pressable>
+      </View>
+
+      <Rotulo>{ehOR ? 'Chave da API (OpenRouter)' : 'Chave da API (x-api-key)'}</Rotulo>
       <TextInput
         style={styles.input}
         value={chave}
-        onChangeText={setChave}
-        placeholder="sk-ant-…"
+        onChangeText={(t) => {
+          // Salva enquanto digita: não dá para o jogador esquecer de tocar "Salvar".
+          setChave(t);
+          setConfig({ apiKey: t.trim() || undefined });
+        }}
+        placeholder={ehOR ? 'sk-or-v1-…' : 'sk-ant-…'}
         placeholderTextColor={cores.linha}
         secureTextEntry
         autoCapitalize="none"
         autoCorrect={false}
       />
+      {!!chave.trim() && (
+        <TextoMono style={{ color: cores.verdigris, marginBottom: esp.xs }}>
+          chave salva neste aparelho ✓
+        </TextoMono>
+      )}
+      {ehOR && (
+        <TextoMono style={{ color: cores.linha, marginBottom: esp.sm }}>
+          Crie a chave grátis em openrouter.ai/keys
+        </TextoMono>
+      )}
+
       <Rotulo>Modelo</Rotulo>
       <TextInput
         style={styles.input}
         value={modelo}
-        onChangeText={setModelo}
-        placeholder="claude-haiku-4-5-20251001"
+        onChangeText={(t) => {
+          setModelo(t);
+          setConfig({ modelo: t.trim() });
+        }}
+        placeholder={ehOR ? MODELO_PADRAO_OPENROUTER : MODELO_PADRAO_ANTHROPIC}
         placeholderTextColor={cores.linha}
         autoCapitalize="none"
         autoCorrect={false}
       />
+      {ehOR && (
+        <View style={{ marginBottom: esp.md }}>
+          <TextoMono style={{ color: cores.mudo, marginBottom: esp.xs }}>
+            Para cena adulta (toque para usar):
+          </TextoMono>
+          {MODELOS_PARA_CENA_ADULTA.map((m) => (
+            <Pressable
+              key={m.id}
+              style={[styles.linhaRec, modelo === m.id && styles.linhaRecAtiva]}
+              onPress={() => {
+                setModelo(m.id);
+                setConfig({ modelo: m.id });
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.recId}>{m.id.replace(':free', '')}</Text>
+                <Text style={styles.recNota}>{m.nota}</Text>
+              </View>
+              <Text style={[styles.recSelo, m.pago ? styles.recPago : styles.recGratis]}>
+                {m.pago ? 'crédito' : 'grátis'}
+              </Text>
+            </Pressable>
+          ))}
+          <TextoMono style={{ color: cores.linha, marginTop: esp.xs }}>
+            Os ":free" vivem caindo e, quando existem, costumam vir de provedor que modera —
+            por isso travam. Os de cima custam frações de centavo por cena: dez dólares de
+            crédito duram muito e resolvem de vez.
+          </TextoMono>
+        </View>
+      )}
+
+      {ehOR && (
+        <View style={{ marginBottom: esp.sm }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: esp.xs }}>
+            <TextoMono style={{ color: cores.mudo, flex: 1 }}>
+              {modelosVivos ? 'Modelos gratuitos da sua conta:' : 'Sugestões (toque para usar):'}
+            </TextoMono>
+            <Pressable style={styles.buscarBtn} onPress={buscar}>
+              <Text style={styles.buscarTxt}>{buscando ? '…' : 'Buscar modelos'}</Text>
+            </Pressable>
+          </View>
+          <View style={styles.chipsSug}>
+            {(modelosVivos ?? SUGESTOES_OPENROUTER.map(comoModelo)).slice(0, 40).map((m) => {
+              const filtrado = m.perfil === 'estrito' || m.moderado;
+              return (
+                <Pressable
+                  key={m.id}
+                  style={[
+                    styles.chipSug,
+                    m.perfil === 'permissivo' && !m.moderado && styles.chipLivre,
+                    filtrado && styles.chipFiltrado,
+                    modelo === m.id && styles.chipSugAtivo,
+                  ]}
+                  onPress={() => {
+                    setModelo(m.id);
+                    setConfig({ modelo: m.id });
+                  }}
+                >
+                  <Text style={styles.chipSugTxt}>{m.id.replace(':free', '')}</Text>
+                  <Text
+                    style={[
+                      styles.chipEtiqueta,
+                      m.perfil === 'permissivo' && !m.moderado
+                        ? styles.etiquetaLivre
+                        : filtrado
+                          ? styles.etiquetaFiltrado
+                          : styles.etiquetaNeutro,
+                    ]}
+                  >
+                    {m.perfil === 'permissivo' && !m.moderado
+                      ? 'costuma narrar sexo'
+                      : filtrado
+                        ? m.moderado
+                          ? 'provedor modera'
+                          : 'costuma recusar'
+                        : 'não se sabe · teste'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <TextoMono style={{ color: cores.linha, marginTop: esp.xs }}>
+            As etiquetas são um palpite pela linhagem do modelo. Quem responde de verdade é o
+            botão "Este modelo narra sexo?" — ele pergunta ao próprio modelo.
+          </TextoMono>
+        </View>
+      )}
 
       <View style={{ flexDirection: 'row', gap: esp.sm }}>
         <View style={{ flex: 1 }}>
@@ -147,13 +358,26 @@ export function Config() {
           <Botao titulo="Testar chave" variante="acento" onPress={testarChave} />
         </View>
       </View>
+      <Botao
+        titulo="Testar narração de verdade"
+        sub="usa exatamente o mesmo caminho do jogo"
+        variante="acento"
+        onPress={testarNarracao}
+      />
+      <Botao
+        titulo="Este modelo narra sexo?"
+        sub="pede uma cena explícita e diz se ele escreveu ou recusou"
+        variante="acento"
+        onPress={testarAdulto}
+      />
       {testando && <Carregando texto="testando…" />}
       {resultado && <TextoMono style={{ color: cores.ouro, marginTop: esp.sm }}>{resultado}</TextoMono>}
 
       <View style={styles.avisoSeg}>
         <TextoMono style={{ color: cores.mudo }}>
-          A chave fica só neste aparelho e vai direto para a Anthropic. Ela nunca é embutida no app
-          nem enviada a terceiros. O uso é cobrado na sua conta.
+          A chave fica só neste aparelho e vai direto para {ehOR ? 'a OpenRouter' : 'a Anthropic'}.
+          Nunca é embutida no app nem enviada a terceiros. O uso é cobrado (ou consome a cota grátis)
+          na sua conta.
         </TextoMono>
       </View>
 
@@ -192,8 +416,18 @@ const styles = StyleSheet.create({
   linhaVal: { fontFamily: fontes.serifMedium, color: cores.vellum, fontSize: 18 },
   planoNota: { marginTop: esp.xl, paddingTop: esp.md, borderTopWidth: 1, borderTopColor: cores.linha },
   explica: { color: cores.mudo, fontSize: 17, lineHeight: 25, marginBottom: esp.lg },
-  switchRow: { flexDirection: 'row', alignItems: 'center', marginBottom: esp.lg, gap: esp.md },
-  switchNome: { fontFamily: fontes.serifMedium, color: cores.vellum, fontSize: 18 },
+  estadoBox: {
+    borderWidth: 1,
+    borderRadius: raio.md,
+    paddingHorizontal: esp.md,
+    paddingVertical: esp.sm,
+    marginBottom: esp.md,
+  },
+  estadoOk: { borderColor: cores.verdigris, backgroundColor: cores.fundo2 },
+  estadoFalta: { borderColor: cores.cinabrio, backgroundColor: cores.fundo2 },
+  estadoTxt: { fontFamily: fontes.monoMedium, fontSize: 12 },
+  estadoTxtOk: { color: cores.verdigris },
+  estadoTxtFalta: { color: cores.cinabrio },
   input: {
     fontFamily: fontes.mono,
     color: cores.vellum,
@@ -213,4 +447,59 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: cores.fundo2,
   },
+  providerRow: { flexDirection: 'row', gap: esp.sm, marginTop: esp.xs, marginBottom: esp.md },
+  provBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: cores.linha,
+    borderRadius: raio.md,
+    padding: esp.md,
+    alignItems: 'center',
+    backgroundColor: 'transparent',
+  },
+  provBtnAtivo: { borderColor: cores.ouro, backgroundColor: cores.couro },
+  provTxt: { fontFamily: fontes.serifMedium, color: cores.mudo, fontSize: 18 },
+  provTxtAtivo: { color: cores.vellum },
+  provSub: { fontFamily: fontes.mono, color: cores.linha, fontSize: 10, marginTop: 2 },
+  chipsSug: { flexDirection: 'row', flexWrap: 'wrap', gap: esp.xs },
+  linhaRec: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: esp.sm,
+    borderWidth: 1,
+    borderColor: cores.fundo3,
+    borderRadius: raio.sm,
+    paddingHorizontal: esp.sm,
+    paddingVertical: 6,
+    marginBottom: 4,
+  },
+  linhaRecAtiva: { borderColor: cores.ouro, backgroundColor: cores.fundo2 },
+  recId: { fontFamily: fontes.mono, color: cores.vellum, fontSize: 10 },
+  recNota: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 9, marginTop: 1 },
+  recSelo: { fontFamily: fontes.mono, fontSize: 9 },
+  recGratis: { color: cores.verdigris },
+  recPago: { color: cores.ouro },
+  chipSug: {
+    borderWidth: 1,
+    borderColor: cores.linha,
+    borderRadius: raio.sm,
+    paddingHorizontal: esp.sm,
+    paddingVertical: 4,
+  },
+  chipSugAtivo: { borderColor: cores.ouro, backgroundColor: cores.fundo3 },
+  chipLivre: { borderColor: cores.verdigris },
+  chipFiltrado: { borderColor: cores.linha, opacity: 0.65 },
+  chipSugTxt: { fontFamily: fontes.mono, color: cores.mudo, fontSize: 10 },
+  chipEtiqueta: { fontFamily: fontes.mono, fontSize: 8, letterSpacing: 0.5, marginTop: 1 },
+  etiquetaLivre: { color: cores.verdigris },
+  etiquetaFiltrado: { color: cores.cinabrio },
+  etiquetaNeutro: { color: cores.linha },
+  buscarBtn: {
+    borderWidth: 1,
+    borderColor: cores.verdigris,
+    borderRadius: raio.sm,
+    paddingHorizontal: esp.sm,
+    paddingVertical: 4,
+  },
+  buscarTxt: { fontFamily: fontes.mono, color: cores.verdigris, fontSize: 11 },
 });

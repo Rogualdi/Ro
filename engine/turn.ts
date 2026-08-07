@@ -9,21 +9,32 @@ import type {
   ImpulsoId,
   Grau,
 } from './types';
-import { resolverTeste, calcularDano, type ResultadoTeste, NOME_GRAU } from './resolution';
+import { resolverTeste, type ResultadoTeste, NOME_GRAU } from './resolution';
 import { avancarPeriodos } from './time';
+import { avancarMundo } from './mundo';
 import { clampRecursos } from './character';
-import { crescerImpulsos, saciar, penalidadePorImpulsos } from './impulsos';
+import { crescerImpulsos, saciar } from './impulsos';
+import { penalidadeEstado } from './risco';
 import { calcularContexto } from './availability';
+import type { Natureza } from './risco';
+import { aplicarEfeito, substituirAlvo } from './effects';
+import { lembrarDoTurno } from './memoria';
 
 export type OpcaoResolvida = {
   id: string;
   rotulo: string;
   dica?: string;
+  // O eixo da escolha, para o conjunto nunca ser cinco vezes a mesma coisa.
+  natureza?: Natureza;
   custoPeriodos: number;
   teste?: { atributo: AttrKey; pericia?: string; dificuldade: number };
   efeitos?: Efeito[];
   impulsoQueSacia?: ImpulsoId;
-  origem: 'cena' | 'verbo' | 'livre';
+  origem: 'cena' | 'verbo' | 'livre' | 'ia';
+  // Quando a opção É um verbo do catálogo, guarda a referência: assim ela roda
+  // com os efeitos reais do verbo em vez de virar uma opção genérica.
+  verboId?: string;
+  alvoId?: string;
 };
 
 export type Intencao =
@@ -37,89 +48,17 @@ export type ResultadoTurno = {
   alvo?: NPC;
   // O "fato consumado" que a narração transforma em prosa (GDD §4.4).
   fato: string;
+  // Quando o jogador escreveu a ação com as próprias palavras, o texto CRU vem
+  // aqui. É ordem literal para o narrador, não material de apoio.
+  acaoLivre?: string;
   custoPeriodos: number;
   efeitosAplicados: Efeito[];
 };
 
-function penalidadeCondicoes(camp: Campaign): number {
-  let pen = 0;
-  if (camp.personagem.condicoes.includes('ferido')) pen += 2;
-  if (camp.personagem.condicoes.includes('exausto')) pen += 2;
-  if (camp.personagem.condicoes.includes('bebado')) pen += 3;
-  return pen;
-}
-
-function aplicarEfeito(camp: Campaign, ef: Efeito): void {
-  const p = camp.personagem;
-  switch (ef.tipo) {
-    case 'recurso':
-      p.recursos[ef.recurso] = (p.recursos[ef.recurso] ?? 0) + ef.delta;
-      break;
-    case 'pressao':
-      p.pressoes[ef.pressao] = (p.pressoes[ef.pressao] ?? 0) + ef.delta;
-      break;
-    case 'impulso':
-      camp.impulsos[ef.impulso] = clamp100((camp.impulsos[ef.impulso] ?? 0) + ef.delta);
-      break;
-    case 'relacao': {
-      const din = camp.npcState[ef.npc];
-      if (din) din.eixos[ef.eixo] = (din.eixos[ef.eixo] ?? 0) + ef.delta;
-      break;
-    }
-    case 'reputacao':
-      camp.reputacao[ef.faccao] = (camp.reputacao[ef.faccao] ?? 0) + ef.delta;
-      break;
-    case 'dinheiro':
-      p.dinheiro = Math.max(0, p.dinheiro + ef.delta);
-      break;
-    case 'xp':
-      p.xp += ef.delta;
-      break;
-    case 'flag':
-      camp.flags[ef.chave] = ef.valor;
-      break;
-    case 'item':
-      p.inventario[ef.item] = Math.max(0, (p.inventario[ef.item] ?? 0) + ef.delta);
-      if (p.inventario[ef.item] === 0) delete p.inventario[ef.item];
-      break;
-    case 'revelarSegredo':
-      if (!camp.segredosRevelados.includes(ef.npc)) camp.segredosRevelados.push(ef.npc);
-      break;
-    case 'condicao':
-      if (ef.adicionar) {
-        if (!p.condicoes.includes(ef.condicao)) p.condicoes.push(ef.condicao);
-      } else {
-        p.condicoes = p.condicoes.filter((c) => c !== ef.condicao);
-      }
-      break;
-    case 'danoJogador': {
-      const dano = calcularDano(camp.rng, ef.perfil);
-      p.recursos.vida = (p.recursos.vida ?? 0) - dano.valor;
-      break;
-    }
-  }
-}
-
-function clamp100(v: number): number {
-  return Math.max(0, Math.min(100, v));
-}
 
 function nomeAlvo(content: ContentBundle, alvoId?: string): NPC | undefined {
   if (!alvoId) return undefined;
   return content.npcs.find((n) => n.id === alvoId);
-}
-
-// Substitui o placeholder "$alvo" pelo NPC realmente alvejado.
-function substituirAlvo(efeitos: Efeito[], alvoId?: string): Efeito[] {
-  return efeitos.map((ef) => {
-    if ('npc' in ef && ef.npc === '$alvo') {
-      return { ...ef, npc: alvoId ?? ef.npc } as Efeito;
-    }
-    if (ef.tipo === 'flag' && ef.chave.includes('$alvo')) {
-      return { ...ef, chave: ef.chave.replace('$alvo', alvoId ?? 'alvo') } as Efeito;
-    }
-    return ef;
-  });
 }
 
 // Constrói o "fato consumado" seco que a narração recebe (GDD §4.4).
@@ -143,21 +82,27 @@ function construirFato(verbo: Verbo, alvo: NPC | undefined, res?: ResultadoTeste
   }
 }
 
-function atualizarNpcs(camp: Campaign, content: ContentBundle, alvoId: string | undefined, turno: number, resumo: string): void {
-  const periodo = camp.calendario.periodoIndex;
+// Quem foi alvo lembra do que houve; quem foi ignorado acumula tensão.
+function atualizarNpcs(
+  camp: Campaign,
+  content: ContentBundle,
+  alvo: NPC | undefined,
+  verbo: Verbo | undefined,
+  grau: Grau | undefined,
+  rotulo: string,
+): void {
   for (const npc of content.npcs) {
     const din = camp.npcState[npc.id];
     if (!din || !din.vivo) continue;
-    if (npc.id === alvoId) {
+    if (alvo && npc.id === alvo.id) {
       din.tensao = Math.max(0, din.tensao - 20);
-      din.memoria.push({ turno, resumo, peso: 2 });
-      if (din.memoria.length > 10) din.memoria.shift();
     } else {
       // Negligência: tensão sobe passivamente (GDD §10.4).
       din.tensao = Math.min(100, din.tensao + 1);
     }
   }
-  void periodo;
+  // A lembrança dela é escrita do ponto de vista dela, e pesada pelo que foi.
+  if (alvo) lembrarDoTurno(camp, alvo, verbo, grau, rotulo);
 }
 
 export function resolverIntencao(
@@ -211,7 +156,7 @@ export function resolverIntencao(
       atributo: p.atributos[teste.atributo],
       pericia: teste.pericia ? p.pericias[teste.pericia] ?? 0 : 0,
       circunstancia: 0,
-      penalidadeEstado: penalidadePorImpulsos(camp) + penalidadeCondicoes(camp),
+      penalidadeEstado: penalidadeEstado(camp),
       dificuldade: teste.dificuldade,
       k: cenario.k,
     });
@@ -241,13 +186,15 @@ export function resolverIntencao(
   if (custoPeriodos > 0) {
     camp.calendario = avancarPeriodos(camp.calendario, custoPeriodos);
     crescerImpulsos(camp, custoPeriodos);
+    // O vale não espera: o tempo cobra de todo mundo, não só do jogador.
+    avancarMundo(content, camp);
   }
 
   const fato = verbo
     ? construirFato(verbo, alvo, resultado)
     : `${rotulo}${resultado ? ` — ${NOME_GRAU[resultado.grau]}` : ''}.`;
 
-  atualizarNpcs(camp, content, intencao.alvoId, camp.turno, fato);
+  atualizarNpcs(camp, content, alvo, verbo, grau, rotulo);
 
   // Sequela: se a vida chegou a 0 (GDD §15) — marca condição agonizante.
   if (p.recursos.vida <= 0 && !p.condicoes.includes('agonizante')) {
